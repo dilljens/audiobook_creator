@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Generated audio output (large binary files)
+output_audiobook/
+output_proper_nouns/
+*.wav
+
+# TTS fixed text output
+**(TTS Fixed)*.txt
