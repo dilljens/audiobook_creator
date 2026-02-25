@@ -42,11 +42,15 @@ Run:
 """
 
 import json
+import os
 import re
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from pathlib import Path
+
+# Model is already cached locally — skip all HuggingFace Hub network calls
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import sounddevice as sd
 import soundfile as sf
@@ -103,6 +107,7 @@ def _get_pipeline():
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=UserWarning)
                     warnings.filterwarnings("ignore", category=FutureWarning)
+                    warnings.filterwarnings("ignore", message=".*unauthenticated.*")
                     _pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
     return _pipeline
 
@@ -214,6 +219,8 @@ class ProperNounAuditor(tk.Tk):
         # Window-level hotkeys (work even when a listbox has keyboard focus)
         self.bind("<space>",  lambda e: self._replay())
         self.bind("s",        lambda e: sd.stop())
+        self.bind("r",        lambda e: self._regen_current()
+                  if self.focus_get() is not self._fix_entry else None)
         self.bind("<Escape>", lambda e: self._reset_fix_entry())
 
     # ── UI construction ────────────────────────────────────────────────────────
@@ -226,7 +233,7 @@ class ProperNounAuditor(tk.Tk):
         title_bar.pack(fill="x", padx=PAD)
         tk.Label(title_bar, text="Proper Noun Pronunciation Auditor",
                  font=("Helvetica", 15, "bold"), bg=BG, fg=FG).pack(side="left")
-        hint = "Space=replay  s=stop  Esc=reset fix  Del=remove from list  Enter=correct|fix"
+        hint = "Space=replay  r=regen  s=stop  Esc=reset fix  Del=remove from list  Enter=correct|fix"
         tk.Label(title_bar, text=hint,
                  font=("Helvetica", 8), bg=BG, fg=FG_DIM).pack(side="left", padx=14)
 
@@ -340,6 +347,8 @@ class ProperNounAuditor(tk.Tk):
         self._fix_entry.pack(side="left")
         self._fix_entry.bind("<Return>", lambda e: self._enter_action())
         self._fix_entry.bind("<Escape>", lambda e: self._reset_fix_entry())
+        self._fix_entry.bind("<Up>",   lambda e: (self._navigate_review(-1), "break")[1])
+        self._fix_entry.bind("<Down>", lambda e: (self._navigate_review(+1), "break")[1])
 
         tk.Label(action_bar, text="Enter=correct  (edit first for fix)  Esc=reset",
                  bg=BG3, fg=FG_DIM, font=("Helvetica", 8)).pack(side="left", padx=(5, 10))
@@ -349,6 +358,8 @@ class ProperNounAuditor(tk.Tk):
                    color=RED).pack(side="left", padx=4)
         styled_btn(action_bar, "↺ Replay  [Space]", self._replay,
                    color=BLUE).pack(side="left", padx=2)
+        styled_btn(action_bar, "↻ Regen  [r]", self._regen_current,
+                   color=GREEN).pack(side="left", padx=2)
 
         tk.Label(action_bar, text="│", bg=BG3, fg=FG_DIM).pack(side="left", padx=4)
         styled_btn(action_bar, "⇄ Apply Fixes to Text",
@@ -437,13 +448,18 @@ class ProperNounAuditor(tk.Tk):
         original = parts[0].strip()
 
         if listbox is self.fixes_lb and len(parts) == 2:
-            # Play the phonetic replacement text
+            # Show original → replacement in the fix entry, play the replacement
             replacement = parts[1].strip()
+            self._fix_entry_word = original
+            self.fix_var.set(replacement)
             self.now_playing_var.set(f"… {replacement}")
             def _on_ready(_path):
                 self.after(0, lambda: self.now_playing_var.set(replacement))
             synth_and_play(replacement, on_ready=_on_ready)
         else:
+            # Correct list — show word in fix entry, play it
+            self._fix_entry_word = original
+            self.fix_var.set(original)
             self._play_word(original)
 
     # ── Actions ────────────────────────────────────────────────────────────────
@@ -478,22 +494,88 @@ class ProperNounAuditor(tk.Tk):
         if self._fix_entry_word:
             self._play_word(self._fix_entry_word)
 
-    def _advance_review(self) -> None:
-        """After an action, select the first remaining word in the review list."""
-        if self.review_lb.size() > 0:
-            self.review_lb.selection_clear(0, "end")
-            self.review_lb.selection_set(0)
-            self.review_lb.see(0)
-            self.review_lb.event_generate("<<ListboxSelect>>")
+    def _regen_current(self) -> None:
+        """Delete the cached WAV for the current word/replacement and re-synthesise."""
+        word = self._fix_entry_word
+        if not word:
+            return
+
+        # Determine which file to delete based on context
+        fix_text = self.fix_var.get().strip()
+        # If the fix box contains something different from the word, regen that text
+        is_fix_replacement = bool(fix_text and fix_text != word)
+
+        if is_fix_replacement:
+            # Re-gen the cached replacement audio
+            target = REPLACEMENTS_DIR / f"{_slug(fix_text)}.wav"
+            if target.exists():
+                target.unlink()
+            self.now_playing_var.set(f"… regen {fix_text}")
+            def _on_ready(_p):
+                self.after(0, lambda: self.now_playing_var.set(fix_text))
+            synth_and_play(fix_text, on_ready=_on_ready)
+        else:
+            # Re-gen the manifest audio for the review word
+            wav_name = self.manifest.get(word)
+            if not wav_name:
+                return
+            wav_path = OUTPUT_DIR / wav_name
+            if wav_path.exists():
+                wav_path.unlink()
+            self.now_playing_var.set(f"… regen {word}")
+
+            def _regen():
+                import warnings, numpy as np
+                pipeline = _get_pipeline()
+                chunks = []
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=UserWarning)
+                    for _, _, audio in pipeline(word, voice=VOICE):
+                        if audio is not None:
+                            chunks.append(audio)
+                if chunks:
+                    sf.write(str(wav_path), np.concatenate(chunks), SAMPLE_RATE)
+                    self.after(0, lambda: self.now_playing_var.set(word))
+                    play_async(wav_path)
+
+            threading.Thread(target=_regen, daemon=True).start()
+
+    def _navigate_review(self, delta: int) -> None:
+        """Move the review list selection up (delta=-1) or down (delta=+1)."""
+        size = self.review_lb.size()
+        if size == 0:
+            return
+        sel = self.review_lb.curselection()
+        current = sel[0] if sel else -1
+        new_idx = max(0, min(size - 1, current + delta))
+        if new_idx == current:
+            return
+        self.review_lb.selection_clear(0, "end")
+        self.review_lb.selection_set(new_idx)
+        self.review_lb.see(new_idx)
+        self.review_lb.event_generate("<<ListboxSelect>>")
+
+    def _advance_review(self, from_idx: int = 0) -> None:
+        """After an action, select the item that was at from_idx (or the last one)."""
+        size = self.review_lb.size()
+        if size == 0:
+            return
+        target = min(from_idx, size - 1)
+        self.review_lb.selection_clear(0, "end")
+        self.review_lb.selection_set(target)
+        self.review_lb.see(target)
+        self.review_lb.event_generate("<<ListboxSelect>>")
 
     def _mark_correct_word(self, word: str) -> None:
+        idx = self.review_lb.curselection()
+        from_idx = idx[0] if idx else 0
         self.correct.add(word)
         save_json(CORRECT_FILE, sorted(self.correct))
         self._fix_entry_word = ""
         self.fix_var.set("")
         self.now_playing_var.set("—")
         self._refresh_all()
-        self._advance_review()
+        self._advance_review(from_idx)
 
     def _mark_correct(self) -> None:
         word = self._selected_review_word()
@@ -504,13 +586,15 @@ class ProperNounAuditor(tk.Tk):
         self._mark_correct_word(word)
 
     def _add_fix_for_word(self, word: str, replacement: str) -> None:
+        idx = self.review_lb.curselection()
+        from_idx = idx[0] if idx else 0
         self.fixes[word] = replacement
         save_json(FIXES_FILE, self.fixes)
         self._fix_entry_word = ""
         self.fix_var.set("")
         self.now_playing_var.set("—")
         self._refresh_all()
-        self._advance_review()
+        self._advance_review(from_idx)
 
     def _add_fix(self) -> None:
         word = self._selected_review_word()

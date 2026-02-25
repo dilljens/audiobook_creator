@@ -4,10 +4,13 @@ __pycache__/
 *.pyo
 .venv/
 
-# Generated audio output (large binary files)
+# Audio files
+*.wav
+*.mp3
+*.flac
 output_audiobook/
 output_proper_nouns/
-*.wav
 
-# TTS fixed text output
-**(TTS Fixed)*.txt
+# Text files (except proper_nouns.txt)
+*.txt
+!proper_nouns.txt
