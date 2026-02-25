@@ -209,8 +209,8 @@ class ProperNounAuditor(tk.Tk):
         self.manifest: dict[str, str] = manifest
         self.all_words: list[str] = sorted(manifest.keys(), key=str.casefold)
 
-        # Persistent data
-        self.correct: set[str]      = set(load_json(CORRECT_FILE, []))
+        # Persistent data — correct is newest-first; fixes dict preserves insertion order
+        self.correct: list[str]     = load_json(CORRECT_FILE, [])
         self.fixes: dict[str, str]  = load_json(FIXES_FILE, {})
 
         self._build_ui()
@@ -364,6 +364,8 @@ class ProperNounAuditor(tk.Tk):
         tk.Label(action_bar, text="│", bg=BG3, fg=FG_DIM).pack(side="left", padx=4)
         styled_btn(action_bar, "⇄ Apply Fixes to Text",
                    self._apply_fixes, color=YELLOW, bg=BG2).pack(side="left", padx=4)
+        styled_btn(action_bar, "⬇ Export Remaining",
+                   self._export_remaining, color=BLUE, bg=BG2).pack(side="left", padx=4)
 
         tk.Label(action_bar, text="│", bg=BG3, fg=FG_DIM).pack(side="left", padx=4)
         self._pregen_btn = styled_btn(
@@ -378,7 +380,7 @@ class ProperNounAuditor(tk.Tk):
     # ── Refresh helpers ────────────────────────────────────────────────────────
 
     def _review_words(self) -> list[str]:
-        excluded = self.correct | set(self.fixes.keys())
+        excluded = set(self.correct) | set(self.fixes.keys())
         q = self.search_var.get().strip().casefold()
         words = [w for w in self.all_words if w not in excluded]
         if q:
@@ -394,13 +396,13 @@ class ProperNounAuditor(tk.Tk):
 
     def _refresh_correct(self) -> None:
         self.correct_lb.delete(0, "end")
-        for w in sorted(self.correct, key=str.casefold):
+        for w in self.correct:  # already newest-first
             self.correct_lb.insert("end", f"  {w}")
         self.correct_count_var.set(f"{len(self.correct)}")
 
     def _refresh_fixes(self) -> None:
         self.fixes_lb.delete(0, "end")
-        for orig, rep in sorted(self.fixes.items(), key=lambda x: x[0].casefold()):
+        for orig, rep in reversed(list(self.fixes.items())):  # newest-first
             self.fixes_lb.insert("end", f"  {orig}  →  {rep}")
         self.fixes_count_var.set(f"{len(self.fixes)}")
 
@@ -556,21 +558,36 @@ class ProperNounAuditor(tk.Tk):
         self.review_lb.event_generate("<<ListboxSelect>>")
 
     def _advance_review(self, from_idx: int = 0) -> None:
-        """After an action, select the item that was at from_idx (or the last one)."""
+        """Select the item at from_idx (clamped), positioned in the upper portion
+        of the viewport so the word doesn't end up in the bottom half unless
+        the list can't scroll any further down."""
         size = self.review_lb.size()
         if size == 0:
             return
         target = min(from_idx, size - 1)
         self.review_lb.selection_clear(0, "end")
         self.review_lb.selection_set(target)
+
+        # First call see() to let tk calculate the viewport, then reposition.
         self.review_lb.see(target)
+        self.review_lb.update_idletasks()
+
+        first, last = self.review_lb.yview()
+        visible_count = max(1, round((last - first) * size))
+
+        # Ideal top-of-viewport: put target ~1/4 down from the top
+        ideal_top = target - visible_count // 4
+        ideal_top = max(0, ideal_top)
+
+        self.review_lb.yview_moveto(ideal_top / size)
         self.review_lb.event_generate("<<ListboxSelect>>")
 
     def _mark_correct_word(self, word: str) -> None:
         idx = self.review_lb.curselection()
         from_idx = idx[0] if idx else 0
-        self.correct.add(word)
-        save_json(CORRECT_FILE, sorted(self.correct))
+        if word not in self.correct:
+            self.correct.insert(0, word)
+        save_json(CORRECT_FILE, self.correct)
         self._fix_entry_word = ""
         self.fix_var.set("")
         self.now_playing_var.set("—")
@@ -588,6 +605,8 @@ class ProperNounAuditor(tk.Tk):
     def _add_fix_for_word(self, word: str, replacement: str) -> None:
         idx = self.review_lb.curselection()
         from_idx = idx[0] if idx else 0
+        # Remove and re-add so updated entries bubble to the top
+        self.fixes.pop(word, None)
         self.fixes[word] = replacement
         save_json(FIXES_FILE, self.fixes)
         self._fix_entry_word = ""
@@ -618,8 +637,9 @@ class ProperNounAuditor(tk.Tk):
             self.fixes.pop(raw, None)
             save_json(FIXES_FILE, self.fixes)
         else:
-            self.correct.discard(raw)
-            save_json(CORRECT_FILE, sorted(self.correct))
+            if raw in self.correct:
+                self.correct.remove(raw)
+            save_json(CORRECT_FILE, self.correct)
         self._refresh_all()
 
     # ── Apply fixes to source text ─────────────────────────────────────────────
@@ -661,6 +681,16 @@ class ProperNounAuditor(tk.Tk):
             self.after(0, lambda: self._pregen_btn.config(state="normal"))
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _export_remaining(self) -> None:
+        words = self._review_words()
+        if not words:
+            messagebox.showinfo("Nothing to export", "No words left to review.")
+            return
+        out = OUTPUT_DIR / "remaining_review.txt"
+        out.write_text("\n".join(words), encoding="utf-8")
+        messagebox.showinfo("Exported",
+                            f"{len(words)} words written to:\n{out}")
 
     def _apply_fixes(self) -> None:
         if not self.fixes:

@@ -18,11 +18,13 @@ from pathlib import Path
 from kokoro import KPipeline
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-SOURCE_FILE = Path("Audio Master Nem Full.txt")
-OUTPUT_DIR  = Path("output_audiobook")
-SAMPLE_RATE = 24000
-SPEED       = 1.0
-LANG_CODE   = "a"   # 'a' = American English
+_FIXED_FILE   = Path("Audio Master Nem Full (TTS Fixed).txt")
+_ORIG_FILE    = Path("Audio Master Nem Full.txt")
+SOURCE_FILE   = _FIXED_FILE if _FIXED_FILE.exists() else _ORIG_FILE
+OUTPUT_DIR    = Path("output_audiobook")
+SAMPLE_RATE   = 24000
+SPEED         = 1.0
+LANG_CODE     = "a"   # 'a' = American English
 
 # ── Available Kokoro voices (American English, lang_code='a') ──────────────────
 #   af_heart   – warm American female      [downloaded]
@@ -145,7 +147,9 @@ def main() -> None:
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    print(f"\nParsing '{SOURCE_FILE}' …")
+    print(f"\nSource: '{SOURCE_FILE}'"
+          + (" ✓ (TTS fixed)" if SOURCE_FILE == _FIXED_FILE else
+             " ⚠ (original — run 'Apply Fixes to Text' in the GUI to use phonetic fixes)"))
     sections = load_and_split(SOURCE_FILE, BOOKS)
     print(f"  Found {len(sections)} sections.\n")
 
