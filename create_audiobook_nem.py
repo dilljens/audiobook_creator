@@ -79,8 +79,20 @@ def load_and_split(source: Path, books: list) -> dict[str, str]:
     Read the source file and split it into sections keyed by label.
     Each section starts at its (start_line1, start_line2) marker pair and
     ends just before the next section's marker.
+
+    Marker positions are always detected from the *original* unmodified file
+    (_ORIG_FILE) when it exists, so that phonetic fixes applied to section
+    headings in the TTS-fixed file can never break section detection.  The
+    line numbers are identical in both files because word-level replacements
+    never add or remove lines.
     """
-    raw_lines = source.read_text(encoding="utf-8").splitlines()
+    # Use the original (un-fixed) file for marker detection so phonetic
+    # changes to heading lines don't break matching.
+    marker_source = _ORIG_FILE if _ORIG_FILE.exists() else source
+    marker_lines = marker_source.read_text(encoding="utf-8").splitlines()
+
+    # The content to actually return comes from `source` (may be fixed file).
+    content_lines = source.read_text(encoding="utf-8").splitlines()
 
     # Build a mapping: (label, line1, line2) for each book
     markers = [(label, m[0].strip(), m[1].strip()) for label, m, _, _ in books]
@@ -88,9 +100,9 @@ def load_and_split(source: Path, books: list) -> dict[str, str]:
     # Find the line index of each marker's first occurrence (two-line match)
     marker_positions: list[tuple[int, int]] = []   # (line_idx, books_idx)
     for book_idx, (label, m1, m2) in enumerate(markers):
-        for line_idx, line in enumerate(raw_lines[:-1]):
-            if (line.strip() == m1 and
-                    raw_lines[line_idx + 1].strip().startswith(m2)):
+        for line_idx, line in enumerate(marker_lines[:-1]):
+            if (line.strip().upper() == m1.upper() and
+                    marker_lines[line_idx + 1].strip().upper().startswith(m2.upper())):
                 marker_positions.append((line_idx, book_idx))
                 break
         else:
@@ -104,8 +116,8 @@ def load_and_split(source: Path, books: list) -> dict[str, str]:
         if rank + 1 < len(marker_positions):
             end_line = marker_positions[rank + 1][0]
         else:
-            end_line = len(raw_lines)
-        text = "\n".join(raw_lines[line_idx:end_line]).strip()
+            end_line = len(content_lines)
+        text = "\n".join(content_lines[line_idx:end_line]).strip()
         sections[label] = text
 
     return sections

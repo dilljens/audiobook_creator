@@ -736,14 +736,24 @@ class ProperNounAuditor(tk.Tk):
         count_total = 0
         for original, replacement in self.fixes.items():
             pattern = r'\b' + re.escape(original) + r'\b'
-            new_text, n = re.subn(pattern, replacement, text)
+            new_text, n = re.subn(pattern, replacement, text, flags=re.IGNORECASE)
             if n:
                 text = new_text
                 count_total += n
+
+        # Convert ALL-CAPS words (2+ letters) to Title Case: HAGOTH → Hagoth
+        # Handles hyphenated names like ANTI-NEPHI-LEHI → Anti-Nephi-Lehi
+        text, n_caps = re.subn(
+            r'\b[A-Z]{2,}(?:-[A-Z]{2,})*\b',
+            lambda m: m.group(0).title(),
+            text,
+        )
+
         FIXED_TEXT_OUT.write_text(text, encoding="utf-8")
         messagebox.showinfo(
             "Done",
-            f"Applied {len(self.fixes)} fix rules ({count_total} replacements).\n\n"
+            f"Applied {len(self.fixes)} fix rules ({count_total} replacements).\n"
+            f"Converted {n_caps} ALL-CAPS words to Title Case.\n\n"
             f"Saved to:\n{FIXED_TEXT_OUT}"
         )
 
