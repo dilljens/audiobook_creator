@@ -24,8 +24,9 @@ from pathlib import Path
 from kokoro import KPipeline
 
 PROPER_NOUNS_FILE = Path("proper_nouns.txt")
-OUTPUT_DIR        = Path("output_proper_nouns")
-MANIFEST_FILE     = OUTPUT_DIR / "manifest.json"
+DATA_DIR          = Path("output_proper_nouns")   # JSON files — tracked in git
+AUDIO_DIR         = Path("proper_nouns_audio")     # WAV files — not tracked
+MANIFEST_FILE     = DATA_DIR / "manifest.json"
 VOICE             = "am_michael"
 SAMPLE_RATE       = 24000
 SPEED             = 1.0
@@ -96,7 +97,8 @@ def main() -> None:
     if device == "cuda":
         print(f"GPU:    {torch.cuda.get_device_name(0)}")
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(exist_ok=True)
+    AUDIO_DIR.mkdir(exist_ok=True)
 
     print(f"Parsing '{PROPER_NOUNS_FILE}' …")
     entries = parse_entries(PROPER_NOUNS_FILE)
@@ -118,7 +120,7 @@ def main() -> None:
     for i, (cat, entry) in enumerate(entries):
         slug = slugify(entry)
         wav_name = f"{slug}.wav"
-        wav_path = OUTPUT_DIR / wav_name
+        wav_path = AUDIO_DIR / wav_name
 
         if entry in manifest and wav_path.exists():
             skipped += 1

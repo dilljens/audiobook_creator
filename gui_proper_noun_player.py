@@ -55,11 +55,12 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import sounddevice as sd
 import soundfile as sf
 
-MANIFEST_FILE        = Path("output_proper_nouns/manifest.json")
-OUTPUT_DIR           = Path("output_proper_nouns")
-REPLACEMENTS_DIR     = OUTPUT_DIR / "replacements_cache"
-CORRECT_FILE         = OUTPUT_DIR / "correct_words.json"
-FIXES_FILE           = OUTPUT_DIR / "pronunciation_fixes.json"
+DATA_DIR             = Path("output_proper_nouns")       # JSON files — tracked in git
+AUDIO_DIR            = Path("proper_nouns_audio")        # WAV files — not tracked
+MANIFEST_FILE        = DATA_DIR / "manifest.json"
+REPLACEMENTS_DIR     = AUDIO_DIR / "replacements_cache"
+CORRECT_FILE         = DATA_DIR / "correct_words.json"
+FIXES_FILE           = DATA_DIR / "pronunciation_fixes.json"
 SOURCE_TEXT          = Path("Audio Master Nem Full.txt")
 FIXED_TEXT_OUT       = Path("Audio Master Nem Full (TTS Fixed).txt")
 
@@ -417,7 +418,7 @@ class ProperNounAuditor(tk.Tk):
         wav_name = self.manifest.get(word)
         if not wav_name:
             return
-        wav_path = OUTPUT_DIR / wav_name
+        wav_path = AUDIO_DIR / wav_name
         if not wav_path.exists():
             messagebox.showwarning("Missing audio",
                                    f"No audio file for '{word}'.\n"
@@ -521,7 +522,7 @@ class ProperNounAuditor(tk.Tk):
             wav_name = self.manifest.get(word)
             if not wav_name:
                 return
-            wav_path = OUTPUT_DIR / wav_name
+            wav_path = AUDIO_DIR / wav_name
             if wav_path.exists():
                 wav_path.unlink()
             self.now_playing_var.set(f"… regen {word}")
@@ -687,7 +688,7 @@ class ProperNounAuditor(tk.Tk):
         if not words:
             messagebox.showinfo("Nothing to export", "No words left to review.")
             return
-        out = OUTPUT_DIR / "remaining_review.txt"
+        out = DATA_DIR / "remaining_review.txt"
         out.write_text("\n".join(words), encoding="utf-8")
         messagebox.showinfo("Exported",
                             f"{len(words)} words written to:\n{out}")
@@ -720,6 +721,7 @@ class ProperNounAuditor(tk.Tk):
 def main() -> None:
     if not MANIFEST_FILE.exists():
         print(f"Manifest not found: '{MANIFEST_FILE}'")
+        print("Run generate_proper_noun_audio.py first.")  # noqa
         print("Run generate_proper_noun_audio.py first.")
         raise SystemExit(1)
 

@@ -9,7 +9,10 @@ __pycache__/
 *.mp3
 *.flac
 output_audiobook/
-output_proper_nouns/
+proper_nouns_audio/
+
+# Generated data (JSON files in output_proper_nouns/ are tracked)
+output_proper_nouns/remaining_review.txt
 
 # Text files (except proper_nouns.txt)
 *.txt
