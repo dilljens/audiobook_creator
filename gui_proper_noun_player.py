@@ -661,6 +661,10 @@ class ProperNounAuditor(tk.Tk):
         if is_dict:
             self.fixes.pop(raw, None)
             save_json(FIXES_FILE, self.fixes)
+            # Also remove from correct so the word returns to Review, not Correct
+            if raw in self.correct:
+                self.correct.remove(raw)
+                save_json(CORRECT_FILE, self.correct)
         else:
             if raw in self.correct:
                 self.correct.remove(raw)
