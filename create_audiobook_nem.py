@@ -256,10 +256,12 @@ def main() -> None:
         elapsed = generate_audio(pipeline, text, voice, out_path)
         timing_rows.append((label, chars, elapsed))
 
-        # Calibrate from first completed book
-        if chars_per_sec is None and elapsed > 0:
-            chars_per_sec = chars / elapsed
-            print(f"  ⏱  Calibrated: {chars_per_sec:.0f} chars/sec")
+        # Update calibration as a cumulative average after every book
+        total_chars_done = sum(c for _, c, _ in timing_rows)
+        total_elapsed_done = sum(e for _, _, e in timing_rows)
+        if total_elapsed_done > 0:
+            chars_per_sec = total_chars_done / total_elapsed_done
+            print(f"  ⏱  Calibration: {chars_per_sec:.0f} chars/sec")
 
     # ── Summary ────────────────────────────────────────────────────────────────
     print("\n" + "─" * 60)
@@ -267,10 +269,13 @@ def main() -> None:
     print("─" * 60)
     for i, (label, chars, elapsed) in enumerate(timing_rows):
         actual_str = _fmt_duration(elapsed)
-        if i == 0 or chars_per_sec is None:
-            est_str = "(calibration)"
+        # Estimate using the cumulative rate *before* this book was added
+        prior_chars = sum(c for _, c, _ in timing_rows[:i])
+        prior_elapsed = sum(e for _, _, e in timing_rows[:i])
+        if prior_elapsed > 0:
+            est_str = _fmt_duration(chars / (prior_chars / prior_elapsed))
         else:
-            est_str = _fmt_duration(chars / chars_per_sec)
+            est_str = "(first run)"
         print(f"  {label:<30}  {chars:>7,}  {actual_str:>8}  {est_str:>8}")
     total_elapsed = sum(e for _, _, e in timing_rows)
     print("─" * 60)
