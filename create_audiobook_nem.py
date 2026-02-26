@@ -4,12 +4,17 @@ audiobook_nem.py
 Generate the Book of the Nem audiobook — one unique voice per book/section.
 
 Usage:
-    python audiobook_nem.py
+    python create_audiobook_nem.py                   # all enabled books
+    python create_audiobook_nem.py --list            # list available book labels
+    python create_audiobook_nem.py Introduction
+    python create_audiobook_nem.py "Book of Hagoth"
+    python create_audiobook_nem.py Introduction "Book of Hagoth"
 
-To skip a section, comment out its entry in BOOKS below.
+To permanently skip a section, comment out its entry in BOOKS below.
 Output .wav files are written to OUTPUT_DIR (created automatically).
 """
 
+import argparse
 import re
 import time
 import numpy as np
@@ -41,30 +46,30 @@ LANG_CODE     = "a"   # 'a' = American English
 #   am_santa   – American male               [downloaded] (not used)
 
 # ── Book definitions ───────────────────────────────────────────────────────────
-# Format: (label, start_marker, voice, output_wav)
-#   start_marker – exact text of the FIRST line of the section header in the source
-#                  (leading/trailing whitespace is ignored when matching)
+# Format: (label, (start_line1, start_line2), voice, output_wav)
+#   start_line1 – exact text of the FIRST line of the section header
+#   start_line2 – prefix of the SECOND line (used together for unambiguous matching)
 #   voice        – Kokoro voice name
 #   output_wav   – filename saved inside OUTPUT_DIR
 #
 # Comment out any line to skip that section entirely.
 BOOKS = [
-    # label                       start_marker                       voice         output_wav
-    ("Introduction",              "Introduction",                    "af_heart",   "00_introduction.wav"),
-    ("Book of Hagoth",            "THE BOOK OF HAGOTH",              "am_fenrir",  "01_hagoth.wav"),
-    # ("Shi-Tugo I",                "THE FIRST BOOK OF SHI-TUGO",      "am_eric",    "02_shi_tugo_1.wav"),
-    # ("Sanempet",                  "THE BOOK OF SANEMPET",            "am_liam",    "03_sanempet.wav"),
-    # ("Oug",                       "THE BOOK OF OUG",                 "am_michael", "04_oug.wav"),
-    # ("Temple Writings of Oug",    "THE BOOK OF",                     "am_michael", "05_temple_writings_oug.wav"),
-    # ("Sacred Temple Writings",    "THE SACRED",                      "am_michael", "06_sacred_temple_writings.wav"),
-    # ("Samuel the Lamanite I",     "THE FIRST BOOK",                  "am_echo",    "07_samuel_lamanite_1.wav"),
-    # ("Samuel the Lamanite II",    "THE SECOND BOOK",                 "am_echo",    "08_samuel_lamanite_2.wav"),
-    # ("Manti",                     "THE BOOK OF MANTI",               "am_onyx",    "09_manti.wav"),
-    # ("Pa Nat I",                  "THE FIRST BOOK OF PA NAT",        "af_nicole",  "10_pa_nat_1.wav"),
-    # ("Moroni I",                  "THE FIRST BOOK OF MORONI",        "am_adam",    "11_moroni_1.wav"),
-    # ("Moroni II",                 "THE SECOND BOOK OF MORONI",       "am_adam",    "12_moroni_2.wav"),
-    # ("Moroni III",                "THE THIRD BOOK OF MORONI",        "am_adam",    "13_moroni_3.wav"),
-    # ("Shioni",                    "THE BOOK OF SHIONI",              "am_puck",    "14_shioni.wav"),
+    # label                       (start_line1,                    start_line2)                           voice         output_wav
+    ("Introduction",              ("Introduction",                 "The Book of the Nem"),                "af_heart",   "00_introduction.wav"),
+    ("Book of Hagoth",            ("THE BOOK OF HAGOTH",           "THE SON OF HAGMENI,"),                 "am_fenrir",  "01_hagoth.wav"),
+    ("Shi-Tugo I",                ("THE FIRST BOOK OF SHI-TUGO",  "FORMER WARRIOR, AMMONITE"),            "am_eric",    "02_shi_tugo_1.wav"),
+    ("Sanempet",                  ("THE BOOK OF SANEMPET",        "THE SON OF HAGMENI,"),                 "am_liam",    "03_sanempet.wav"),
+    ("Oug",                       ("THE BOOK OF OUG",             "THE SON OF SANEMPET"),                 "am_michael", "04_oug.wav"),
+    ("Temple Writings of Oug",    ("THE BOOK OF",                 "THE TEMPLE WRITINGS"),                "am_michael", "05_temple_writings_oug.wav"),
+    ("Sacred Temple Writings",    ("THE SACRED",                  "TEMPLE WRITINGS"),                     "am_michael", "06_sacred_temple_writings.wav"),
+    ("Samuel the Lamanite I",     ("THE FIRST BOOK",              "OF SAMUEL THE LAMANITE"),             "am_echo",    "07_samuel_lamanite_1.wav"),
+    ("Samuel the Lamanite II",    ("THE SECOND BOOK",             "OF SAMUEL THE LAMANITE"),             "am_echo",    "08_samuel_lamanite_2.wav"),
+    ("Manti",                     ("THE BOOK OF MANTI",           "THE SON OF OUG"),                      "am_onyx",    "09_manti.wav"),
+    ("Pa Nat I",                  ("THE FIRST BOOK OF PA NAT",    "THE DAUGHTER OF SHIMLEI"),             "af_nicole",  "10_pa_nat_1.wav"),
+    ("Moroni I",                  ("THE FIRST BOOK OF MORONI",    "THE SON OF MORMON,"),                  "am_adam",    "11_moroni_1.wav"),
+    ("Moroni II",                 ("THE SECOND BOOK OF MORONI",   "THE SON OF MORMON,"),                  "am_adam",    "12_moroni_2.wav"),
+    ("Moroni III",                ("THE THIRD BOOK OF MORONI",    "THE SON OF MORMON,"),                  "am_adam",    "13_moroni_3.wav"),
+    ("Shioni",                    ("THE BOOK OF SHIONI",          "THE SON OF MORONI"),                   "am_puck",    "14_shioni.wav"),
 ]
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -72,23 +77,24 @@ BOOKS = [
 def load_and_split(source: Path, books: list) -> dict[str, str]:
     """
     Read the source file and split it into sections keyed by label.
-    Each section starts at its start_marker line and ends just before the
-    next section's start_marker.
+    Each section starts at its (start_line1, start_line2) marker pair and
+    ends just before the next section's marker.
     """
     raw_lines = source.read_text(encoding="utf-8").splitlines()
 
-    # Build a mapping: marker_text → index in BOOKS
-    markers = [(label, marker.strip()) for label, marker, _, _ in books]
+    # Build a mapping: (label, line1, line2) for each book
+    markers = [(label, m[0].strip(), m[1].strip()) for label, m, _, _ in books]
 
-    # Find the line index of each marker's first occurrence
+    # Find the line index of each marker's first occurrence (two-line match)
     marker_positions: list[tuple[int, int]] = []   # (line_idx, books_idx)
-    for book_idx, (label, marker) in enumerate(markers):
-        for line_idx, line in enumerate(raw_lines):
-            if line.strip() == marker:
+    for book_idx, (label, m1, m2) in enumerate(markers):
+        for line_idx, line in enumerate(raw_lines[:-1]):
+            if (line.strip() == m1 and
+                    raw_lines[line_idx + 1].strip().startswith(m2)):
                 marker_positions.append((line_idx, book_idx))
                 break
         else:
-            print(f"  ⚠  Marker not found for '{label}': '{marker}' — skipping")
+            print(f"  ⚠  Marker not found for '{label}': '{m1}' / '{m2}' — skipping")
 
     marker_positions.sort(key=lambda x: x[0])
 
@@ -154,6 +160,38 @@ def generate_audio(pipeline: KPipeline, text: str, voice: str,
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # ── CLI ────────────────────────────────────────────────────────────
+    parser = argparse.ArgumentParser(description="Generate Nem audiobook sections.")
+    parser.add_argument(
+        "books", nargs="*",
+        help="Labels of sections to generate (default: all enabled books). "
+             "Use --list to see available labels."
+    )
+    parser.add_argument(
+        "--list", action="store_true",
+        help="Print all enabled book labels and exit."
+    )
+    args = parser.parse_args()
+
+    enabled_labels = [label for label, _, _, _ in BOOKS]
+
+    if args.list:
+        print("Enabled books:")
+        for label in enabled_labels:
+            print(f"  {label}")
+        return
+
+    # Filter to requested subset, preserving BOOKS order
+    if args.books:
+        unknown = [b for b in args.books if b not in enabled_labels]
+        if unknown:
+            print(f"Unknown book label(s): {', '.join(unknown)}")
+            print(f"Run with --list to see available labels.")
+            return
+        run_books = [b for b in BOOKS if b[0] in args.books]
+    else:
+        run_books = list(BOOKS)
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
     if device == "cuda":
@@ -164,8 +202,10 @@ def main() -> None:
     print(f"\nSource: '{SOURCE_FILE}'"
           + (" ✓ (TTS fixed)" if SOURCE_FILE == _FIXED_FILE else
              " ⚠ (original — run 'Apply Fixes to Text' in the GUI to use phonetic fixes)"))
+    # Always split using ALL books for correct section boundaries,
+    # but only generate for run_books.
     sections = load_and_split(SOURCE_FILE, BOOKS)
-    print(f"  Found {len(sections)} sections.\n")
+    print(f"  Found {len(sections)} sections ({len(run_books)} selected).\n")
 
     print("Initialising Kokoro pipeline …")
     pipeline = KPipeline(lang_code=LANG_CODE)
@@ -173,14 +213,26 @@ def main() -> None:
     # Pre-compute char counts for all sections so we can estimate ETAs
     section_chars: dict[str, int] = {
         label: len(clean_text(sections[label]))
-        for label, _, _, _ in BOOKS
+        for label, _, _, _ in run_books
         if label in sections
     }
+
+    # Print char count summary before starting
+    print(f"\n{'─' * 52}")
+    print(f"  {'Section':<30}  {'Chars':>8}")
+    print(f"{'─' * 52}")
+    for label, _, _, wav_name in run_books:
+        if label in section_chars:
+            print(f"  {label:<30}  {section_chars[label]:>8,}")
+    print(f"{'─' * 52}")
+    total_chars = sum(section_chars.values())
+    print(f"  {'TOTAL':<30}  {total_chars:>8,}")
+    print()
 
     chars_per_sec: float | None = None   # derived from the first book that finishes
     timing_rows: list[tuple[str, int, float]] = []  # (label, chars, elapsed)
 
-    for label, marker, voice, wav_name in BOOKS:
+    for label, _marker, voice, wav_name in run_books:
         if label not in sections:
             continue
 

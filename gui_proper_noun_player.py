@@ -84,8 +84,11 @@ MAUVE   = "#cba6f7"
 def play_async(path: Path) -> None:
     sd.stop()
     def _play():
-        data, sr = sf.read(str(path), dtype="float32")
-        sd.play(data, sr)
+        try:
+            data, sr = sf.read(str(path), dtype="float32")
+            sd.play(data, sr)
+        except Exception as exc:
+            print(f"[audio] playback error: {exc}")
     threading.Thread(target=_play, daemon=True).start()
 
 
@@ -119,11 +122,14 @@ def synth_and_play(text: str, on_ready=None) -> None:
     *on_ready(path)* is called on the same thread once the file is written.
     """
     def _run():
-        path = _synth_to_cache(text)
-        if path:
-            if on_ready:
-                on_ready(path)
-            play_async(path)
+        try:
+            path = _synth_to_cache(text)
+            if path:
+                if on_ready:
+                    on_ready(path)
+                play_async(path)
+        except Exception as exc:
+            print(f"[synth] error synthesising '{text}': {exc}")
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -216,6 +222,8 @@ class ProperNounAuditor(tk.Tk):
 
         self._build_ui()
         self._refresh_all()
+        self._alive = True
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Window-level hotkeys (work even when a listbox has keyboard focus)
         self.bind("<space>",  lambda e: self._replay())
@@ -223,6 +231,19 @@ class ProperNounAuditor(tk.Tk):
         self.bind("r",        lambda e: self._regen_current()
                   if self.focus_get() is not self._fix_entry else None)
         self.bind("<Escape>", lambda e: self._reset_fix_entry())
+
+    def _on_close(self) -> None:
+        self._alive = False
+        sd.stop()
+        self.destroy()
+
+    def _safe_after(self, ms: int, func) -> None:
+        """Schedule func on the Tk thread; silently no-ops if window is gone."""
+        if self._alive:
+            try:
+                self.after(ms, func)
+            except RuntimeError:
+                pass
 
     # ── UI construction ────────────────────────────────────────────────────────
 
@@ -457,7 +478,7 @@ class ProperNounAuditor(tk.Tk):
             self.fix_var.set(replacement)
             self.now_playing_var.set(f"… {replacement}")
             def _on_ready(_path):
-                self.after(0, lambda: self.now_playing_var.set(replacement))
+                self._safe_after(0, lambda: self.now_playing_var.set(replacement))
             synth_and_play(replacement, on_ready=_on_ready)
         else:
             # Correct list — show word in fix entry, play it
@@ -515,7 +536,7 @@ class ProperNounAuditor(tk.Tk):
                 target.unlink()
             self.now_playing_var.set(f"… regen {fix_text}")
             def _on_ready(_p):
-                self.after(0, lambda: self.now_playing_var.set(fix_text))
+                self._safe_after(0, lambda: self.now_playing_var.set(fix_text))
             synth_and_play(fix_text, on_ready=_on_ready)
         else:
             # Re-gen the manifest audio for the review word
@@ -528,18 +549,21 @@ class ProperNounAuditor(tk.Tk):
             self.now_playing_var.set(f"… regen {word}")
 
             def _regen():
-                import warnings, numpy as np
-                pipeline = _get_pipeline()
-                chunks = []
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", category=UserWarning)
-                    for _, _, audio in pipeline(word, voice=VOICE):
-                        if audio is not None:
-                            chunks.append(audio)
-                if chunks:
-                    sf.write(str(wav_path), np.concatenate(chunks), SAMPLE_RATE)
-                    self.after(0, lambda: self.now_playing_var.set(word))
-                    play_async(wav_path)
+                try:
+                    import warnings, numpy as np
+                    pipeline = _get_pipeline()
+                    chunks = []
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", category=UserWarning)
+                        for _, _, audio in pipeline(word, voice=VOICE):
+                            if audio is not None:
+                                chunks.append(audio)
+                    if chunks:
+                        sf.write(str(wav_path), np.concatenate(chunks), SAMPLE_RATE)
+                        self._safe_after(0, lambda: self.now_playing_var.set(word))
+                        play_async(wav_path)
+                except Exception as exc:
+                    print(f"[regen] error for '{word}': {exc}")
 
             threading.Thread(target=_regen, daemon=True).start()
 
@@ -669,17 +693,21 @@ class ProperNounAuditor(tk.Tk):
         self._pregen_status_var.set(f"0 / {new_count} new  ({already} cached)")
 
         def _run():
-            done = 0
-            for rep in replacements:
-                cache_path = REPLACEMENTS_DIR / f"{_slug(rep)}.wav"
-                if not cache_path.exists():
-                    _synth_to_cache(rep)
-                    done += 1
-                    self.after(0, lambda d=done, t=new_count:
-                               self._pregen_status_var.set(f"{d} / {t} synthesised…"))
-            self.after(0, lambda: self._pregen_status_var.set(
-                f"Done — {total} clips ready"))
-            self.after(0, lambda: self._pregen_btn.config(state="normal"))
+            try:
+                done = 0
+                for rep in replacements:
+                    cache_path = REPLACEMENTS_DIR / f"{_slug(rep)}.wav"
+                    if not cache_path.exists():
+                        _synth_to_cache(rep)
+                        done += 1
+                        self._safe_after(0, lambda d=done, t=new_count:
+                                   self._pregen_status_var.set(f"{d} / {t} synthesised…"))
+                self._safe_after(0, lambda: self._pregen_status_var.set(
+                    f"Done — {total} clips ready"))
+            except Exception as exc:
+                print(f"[pregen] error: {exc}")
+            finally:
+                self._safe_after(0, lambda: self._pregen_btn.config(state="normal"))
 
         threading.Thread(target=_run, daemon=True).start()
 
