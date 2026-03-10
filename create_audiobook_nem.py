@@ -33,8 +33,12 @@ SPEED         = 1.0
 LANG_CODE     = "a"   # 'a' = American English
 
 # ── Available Kokoro voices (American English, lang_code='a') ──────────────────
-#   af_heart   – warm American female      [downloaded]
+#   af_bella   – American female             [downloaded]
+#   af_heart   – warm American female        [downloaded]
 #   af_nicole  – American female             [downloaded]
+#   af_river   – American female             [downloaded]
+#   af_sarah   – American female             [downloaded]
+#   af_sky     – American female             [downloaded]
 #   am_adam    – American male (deep)        [downloaded]
 #   am_echo    – American male               [downloaded]
 #   am_eric    – American male               [downloaded]
@@ -56,7 +60,7 @@ LANG_CODE     = "a"   # 'a' = American English
 BOOKS = [
     # label                       (start_line1,                    start_line2)                           voice         output_wav
     ("Introduction",              ("Introduction",                 "The Book of the Nem"),                "af_heart",   "00_introduction.wav"),
-    ("Book of Hagoth",            ("THE BOOK OF HAGOTH",           "THE SON OF HAGMENI,"),                 "am_fenrir",  "01_hagoth.wav"),
+    ("Book of Hagoth",            ("THE BOOK OF HAGOTH",           "THE SON OF HAGMENI,"),                 "am_santa",  "01_hagoth.wav"),
     ("Shi-Tugo I",                ("THE FIRST BOOK OF SHI-TUGO",  "FORMER WARRIOR, AMMONITE"),            "am_eric",    "02_shi_tugo_1.wav"),
     ("Sanempet",                  ("THE BOOK OF SANEMPET",        "THE SON OF HAGMENI,"),                 "am_liam",    "03_sanempet.wav"),
     ("Oug",                       ("THE BOOK OF OUG",             "THE SON OF SANEMPET"),                 "am_michael", "04_oug.wav"),
@@ -65,7 +69,7 @@ BOOKS = [
     ("Samuel the Lamanite I",     ("THE FIRST BOOK",              "OF SAMUEL THE LAMANITE"),             "am_echo",    "07_samuel_lamanite_1.wav"),
     ("Samuel the Lamanite II",    ("THE SECOND BOOK",             "OF SAMUEL THE LAMANITE"),             "am_echo",    "08_samuel_lamanite_2.wav"),
     ("Manti",                     ("THE BOOK OF MANTI",           "THE SON OF OUG"),                      "am_onyx",    "09_manti.wav"),
-    ("Pa Nat I",                  ("THE FIRST BOOK OF PA NAT",    "THE DAUGHTER OF SHIMLEI"),             "af_nicole",  "10_pa_nat_1.wav"),
+    ("Pa Nat I",                  ("THE FIRST BOOK OF PA NAT",    "THE DAUGHTER OF SHIMLEI"),             "af_bella",  "10_pa_nat_1.wav"),
     ("Moroni I",                  ("THE FIRST BOOK OF MORONI",    "THE SON OF MORMON,"),                  "am_adam",    "11_moroni_1.wav"),
     ("Moroni II",                 ("THE SECOND BOOK OF MORONI",   "THE SON OF MORMON,"),                  "am_adam",    "12_moroni_2.wav"),
     ("Moroni III",                ("THE THIRD BOOK OF MORONI",    "THE SON OF MORMON,"),                  "am_adam",    "13_moroni_3.wav"),
@@ -183,6 +187,11 @@ def main() -> None:
         "--list", action="store_true",
         help="Print all enabled book labels and exit."
     )
+    parser.add_argument(
+        "--preview", nargs="?", const=3000, type=int, metavar="CHARS",
+        help="Generate a short preview clip per book (default: 3000 chars). "
+             "Output filenames get a _preview suffix."
+    )
     args = parser.parse_args()
 
     enabled_labels = [label for label, _, _, _ in BOOKS]
@@ -230,7 +239,8 @@ def main() -> None:
     }
 
     # Print char count summary before starting
-    print(f"\n{'─' * 52}")
+    preview_note = f"  ⚡ PREVIEW MODE — capped at {args.preview:,} chars/book\n" if args.preview else ""
+    print(f"\n{preview_note}{'─' * 52}")
     print(f"  {'Section':<30}  {'Chars':>8}")
     print(f"{'─' * 52}")
     for label, _, _, wav_name in run_books:
@@ -253,7 +263,14 @@ def main() -> None:
             print(f"\n[{label}]  ⚠  Empty text — skipping")
             continue
 
-        chars = section_chars[label]
+        # Preview mode: truncate to requested char limit at a word boundary
+        preview_chars = args.preview
+        if preview_chars:
+            if len(text) > preview_chars:
+                cut = text.rfind(" ", 0, preview_chars)
+                text = text[: cut if cut > 0 else preview_chars]
+
+        chars = len(text)
 
         # Print ETA once we have a calibration rate
         if chars_per_sec is not None:
@@ -264,7 +281,8 @@ def main() -> None:
             print(f"\n[{label}]  voice={voice}  →  {wav_name}  (timing calibration run)")
 
         stem, ext = wav_name.rsplit(".", 1)
-        out_path = OUTPUT_DIR / f"{stem}_{voice}.{ext}"
+        preview_tag = "_preview" if preview_chars else ""
+        out_path = OUTPUT_DIR / f"{stem}_{voice}{preview_tag}.{ext}"
         elapsed = generate_audio(pipeline, text, voice, out_path)
         timing_rows.append((label, chars, elapsed))
 
