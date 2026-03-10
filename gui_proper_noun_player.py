@@ -1,9 +1,16 @@
 """
-proper_noun_player.py
-──────────────────────
-GUI for auditing proper noun pronunciations.
+gui_proper_noun_player.py
+──────────────────────────
+GUI for auditing proper noun pronunciations — supports multiple books.
 
-Three columns (all persisted as JSON, original manifest never modified):
+Each book's data is isolated in its own subdirectory:
+  output_proper_nouns/<book_slug>/manifest.json
+  output_proper_nouns/<book_slug>/correct_words.json
+  output_proper_nouns/<book_slug>/pronunciation_fixes.json
+  proper_nouns_audio/<book_slug>/<word>.wav
+  proper_nouns_audio/<book_slug>/replacements_cache/<phonetic>.wav
+
+Three columns (all persisted as JSON per book):
   • Review   – words not yet audited
   • Correct  – words that already pronounce fine
   • Fixes    – linked list: original word → phonetic replacement
@@ -33,12 +40,8 @@ On the Fixes list:
 "Apply Fixes to Text" writes a TTS-ready copy of the source file with all
 substitutions applied (case-sensitive whole-word replace).
 
-Data files (auto-created in output_proper_nouns/):
-  correct_words.json       – list of correct words
-  pronunciation_fixes.json – { "Nephi": "Kneephi", … }
-
 Run:
-    .venv/bin/python proper_noun_player.py
+    .venv/bin/python gui_proper_noun_player.py
 """
 
 import json
@@ -48,6 +51,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from pathlib import Path
+from typing import NamedTuple
 
 # Model is already cached locally — skip all HuggingFace Hub network calls
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -55,17 +59,55 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import sounddevice as sd
 import soundfile as sf
 
-DATA_DIR             = Path("output_proper_nouns")       # JSON files — tracked in git
-AUDIO_DIR            = Path("proper_nouns_audio")        # WAV files — not tracked
-MANIFEST_FILE        = DATA_DIR / "manifest.json"
-REPLACEMENTS_DIR     = AUDIO_DIR / "replacements_cache"
-CORRECT_FILE         = DATA_DIR / "correct_words.json"
-FIXES_FILE           = DATA_DIR / "pronunciation_fixes.json"
-SOURCE_TEXT          = Path("Audio Master Nem Full.txt")
-FIXED_TEXT_OUT       = Path("Audio Master Nem Full (TTS Fixed).txt")
+VOICE       = "am_michael"
+SAMPLE_RATE = 24000
 
-VOICE                = "am_michael"
-SAMPLE_RATE          = 24000
+# ── Book source ────────────────────────────────────────────────────────────────
+
+class BookSource(NamedTuple):
+    label: str          # Display name shown in the UI
+    slug: str           # Filesystem-safe identifier used for subdirectory names
+    source_paths: list  # list[Path] — one or more source .txt files
+    fixed_out: Path     # Where "Apply Fixes to Text" writes the TTS-ready copy
+
+
+def _book_slug(text: str) -> str:
+    """Convert a display name to a lowercase filesystem-safe slug."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", text).strip("_")[:60].lower()
+
+
+def discover_books(root: Path = Path(".")) -> list[BookSource]:
+    """Scan the workspace root for candidate source text files and directories."""
+    books: list[BookSource] = []
+    EXCLUDE = {"tts fixed", "proper_noun", "table of contents", "columns pdf"}
+
+    # Root-level .txt files (single-file books)
+    for f in sorted(root.glob("*.txt")):
+        name_lower = f.stem.lower()
+        if any(kw in name_lower for kw in EXCLUDE):
+            continue
+        if f.stat().st_size < 10_000:   # skip tiny/metadata files
+            continue
+        slug = _book_slug(f.stem)
+        fixed_out = f.parent / f"{f.stem} (TTS Fixed).txt"
+        books.append(BookSource(label=f.stem, slug=slug,
+                                source_paths=[f], fixed_out=fixed_out))
+
+    # Sub-directories containing .txt files (multi-file books, e.g. Lightbringer)
+    for d in sorted(root.iterdir()):
+        if not d.is_dir():
+            continue
+        if d.name.startswith(("output_", "proper_noun", "__", ".")):
+            continue
+        txts = sorted(d.glob("*.txt"))
+        if not txts:
+            continue
+        slug = _book_slug(d.name)
+        fixed_out = d / f"{d.name} (TTS Fixed).txt"
+        books.append(BookSource(label=d.name, slug=slug,
+                                source_paths=list(txts), fixed_out=fixed_out))
+
+    return books
 
 # ── Colours ────────────────────────────────────────────────────────────────────
 BG      = "#1e1e2e"
@@ -116,14 +158,14 @@ def _get_pipeline():
     return _pipeline
 
 
-def synth_and_play(text: str, on_ready=None) -> None:
-    """Synthesise *text* with Kokoro (cached) and play it.
+def synth_and_play(text: str, replacements_dir: Path, on_ready=None) -> None:
+    """Synthesise *text* with Kokoro (cached to *replacements_dir*) and play it.
     Runs entirely on a daemon thread so the GUI never blocks.
     *on_ready(path)* is called on the same thread once the file is written.
     """
     def _run():
         try:
-            path = _synth_to_cache(text)
+            path = _synth_to_cache(text, replacements_dir)
             if path:
                 if on_ready:
                     on_ready(path)
@@ -134,12 +176,12 @@ def synth_and_play(text: str, on_ready=None) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _synth_to_cache(text: str) -> "Path | None":
+def _synth_to_cache(text: str, replacements_dir: Path) -> "Path | None":
     """Synthesise *text* to a cached WAV and return its path (or None on failure).
     Skips synthesis if the file already exists.  Safe to call from any thread.
     """
-    REPLACEMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    cache_path = REPLACEMENTS_DIR / f"{_slug(text)}.wav"
+    replacements_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = replacements_dir / f"{_slug(text)}.wav"
     if not cache_path.exists():
         import warnings
         import numpy as np
@@ -206,31 +248,103 @@ class ProperNounAuditor(tk.Tk):
     # tracks which word is currently loaded into the fix entry
     _fix_entry_word: str = ""
 
-    def __init__(self, manifest: dict[str, str]) -> None:
+    def __init__(self, books: list[BookSource]) -> None:
         super().__init__()
         self.title("Proper Noun Pronunciation Auditor")
-        self.geometry("1020x700")
-        self.minsize(800, 500)
+        self.geometry("1020x760")
+        self.minsize(800, 560)
         self.configure(bg=BG)
 
-        self.manifest: dict[str, str] = manifest
-        self.all_words: list[str] = sorted(manifest.keys(), key=str.casefold)
+        self.books: list[BookSource] = books
+        self.book: BookSource | None = None
 
-        # Persistent data — correct is newest-first; fixes dict preserves insertion order
-        self.correct: list[str]     = load_json(CORRECT_FILE, [])
-        self.fixes: dict[str, str]  = load_json(FIXES_FILE, {})
+        # Loaded per-book via _load_book()
+        self.manifest: dict[str, str] = {}
+        self.all_words: list[str] = []
+        self.correct: list[str] = []
+        self.fixes: dict[str, str] = {}
 
         self._build_ui()
-        self._refresh_all()
         self._alive = True
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Window-level hotkeys (work even when a listbox has keyboard focus)
+        # Window-level hotkeys
         self.bind("<space>",  lambda e: self._replay())
         self.bind("s",        lambda e: sd.stop())
         self.bind("r",        lambda e: self._regen_current()
                   if self.focus_get() is not self._fix_entry else None)
         self.bind("<Escape>", lambda e: self._reset_fix_entry())
+
+        # Auto-load first book that already has a manifest; otherwise select first
+        for book in books:
+            if (Path("output_proper_nouns") / book.slug / "manifest.json").exists():
+                self._load_book(book)
+                break
+        else:
+            if books:
+                self._book_var.set(books[0].label)
+                self._on_book_change()
+
+    # ── Per-book path properties ─────────────────────────────────────────────────
+
+    @property
+    def _data_dir(self) -> Path:
+        return Path("output_proper_nouns") / self.book.slug
+
+    @property
+    def _audio_dir(self) -> Path:
+        return Path("proper_nouns_audio") / self.book.slug
+
+    @property
+    def _manifest_file(self) -> Path:
+        return self._data_dir / "manifest.json"
+
+    @property
+    def _replacements_dir(self) -> Path:
+        return self._audio_dir / "replacements_cache"
+
+    @property
+    def _correct_file(self) -> Path:
+        return self._data_dir / "correct_words.json"
+
+    @property
+    def _fixes_file(self) -> Path:
+        return self._data_dir / "pronunciation_fixes.json"
+
+    # ── Book loading / switching ──────────────────────────────────────────────────
+
+    def _load_book(self, book: BookSource) -> None:
+        """Switch to *book* — reload all state from its per-book data files."""
+        sd.stop()
+        self.book = book
+        self._book_var.set(book.label)
+
+        if self._manifest_file.exists():
+            self.manifest = load_json(self._manifest_file, {})
+        else:
+            self.manifest = {}
+
+        self.all_words = sorted(self.manifest.keys(), key=str.casefold)
+        self.correct   = load_json(self._correct_file, [])
+        self.fixes     = load_json(self._fixes_file, {})
+
+        n = len(self.manifest)
+        if n:
+            status = f"{n} words loaded  ·  {len(self.correct)} correct  ·  {len(self.fixes)} fixes"
+        else:
+            status = "No manifest yet — click  ⚙ Extract & Generate Audio  to create one"
+        self._book_status_var.set(status)
+
+        self._refresh_all()
+        self.fix_var.set("")
+        self._fix_entry_word = ""
+        self.now_playing_var.set("—")
+
+    def _on_book_change(self, event=None) -> None:
+        label = self._book_var.get()
+        book = next((b for b in self.books if b.label == label), None)
+        if book:
+            self._load_book(book)
 
     def _on_close(self) -> None:
         self._alive = False
@@ -250,7 +364,37 @@ class ProperNounAuditor(tk.Tk):
     def _build_ui(self) -> None:
         PAD = 8
 
-        # Title bar
+        # ── Book selector bar ──────────────────────────────────────────────────────
+        book_bar = tk.Frame(self, bg=BG2, pady=7)
+        book_bar.pack(fill="x")
+
+        tk.Label(book_bar, text="  Book:", bg=BG2, fg=FG_DIM,
+                 font=("Helvetica", 10, "bold")).pack(side="left", padx=(10, 4))
+
+        self._book_var = tk.StringVar()
+        book_menu = ttk.Combobox(
+            book_bar, textvariable=self._book_var,
+            values=[b.label for b in self.books],
+            state="readonly", font=("Helvetica", 10), width=44)
+        book_menu.pack(side="left", padx=(0, 8))
+        book_menu.bind("<<ComboboxSelected>>", self._on_book_change)
+
+        self._extract_btn = styled_btn(
+            book_bar, "⚙ Extract & Generate Audio",
+            self._extract_and_generate, color=GREEN, bg=BG3)
+        self._extract_btn.pack(side="left", padx=4)
+
+        styled_btn(book_bar, "⇄ Apply Fixes to Text",
+                   self._apply_fixes, color=YELLOW, bg=BG3).pack(side="left", padx=4)
+        styled_btn(book_bar, "⬇ Export Remaining",
+                   self._export_remaining, color=BLUE, bg=BG3).pack(side="left", padx=4)
+
+        self._book_status_var = tk.StringVar(value="Select a book above")
+        tk.Label(book_bar, textvariable=self._book_status_var,
+                 bg=BG2, fg=FG_DIM, font=("Helvetica", 9),
+                 anchor="w").pack(side="left", padx=(10, 10))
+
+        # ── Title bar ─────────────────────────────────────────────────────────
         title_bar = tk.Frame(self, bg=BG, pady=6)
         title_bar.pack(fill="x", padx=PAD)
         tk.Label(title_bar, text="Proper Noun Pronunciation Auditor",
@@ -384,12 +528,6 @@ class ProperNounAuditor(tk.Tk):
                    color=GREEN).pack(side="left", padx=2)
 
         tk.Label(action_bar, text="│", bg=BG3, fg=FG_DIM).pack(side="left", padx=4)
-        styled_btn(action_bar, "⇄ Apply Fixes to Text",
-                   self._apply_fixes, color=YELLOW, bg=BG2).pack(side="left", padx=4)
-        styled_btn(action_bar, "⬇ Export Remaining",
-                   self._export_remaining, color=BLUE, bg=BG2).pack(side="left", padx=4)
-
-        tk.Label(action_bar, text="│", bg=BG3, fg=FG_DIM).pack(side="left", padx=4)
         self._pregen_btn = styled_btn(
             action_bar, "↻ Pre-gen Fix Audio",
             self._pregen_all_fix_audio, color=MAUVE, bg=BG2)
@@ -436,14 +574,16 @@ class ProperNounAuditor(tk.Tk):
     # ── Playback ───────────────────────────────────────────────────────────────
 
     def _play_word(self, word: str) -> None:
+        if not self.book:
+            return
         wav_name = self.manifest.get(word)
         if not wav_name:
             return
-        wav_path = AUDIO_DIR / wav_name
+        wav_path = self._audio_dir / wav_name
         if not wav_path.exists():
             messagebox.showwarning("Missing audio",
                                    f"No audio file for '{word}'.\n"
-                                   "Run generate_proper_noun_audio.py first.")
+                                   "Click '⚙ Extract & Generate Audio' first.")
             return
         self.now_playing_var.set(word)
         play_async(wav_path)
@@ -464,6 +604,8 @@ class ProperNounAuditor(tk.Tk):
         self._play_word(word)
 
     def _on_side_select(self, listbox: tk.Listbox) -> None:
+        if not self.book:
+            return
         sel = listbox.curselection()
         if not sel:
             return
@@ -472,16 +614,15 @@ class ProperNounAuditor(tk.Tk):
         original = parts[0].strip()
 
         if listbox is self.fixes_lb and len(parts) == 2:
-            # Show original → replacement in the fix entry, play the replacement
             replacement = parts[1].strip()
             self._fix_entry_word = original
             self.fix_var.set(replacement)
             self.now_playing_var.set(f"… {replacement}")
+            rdir = self._replacements_dir
             def _on_ready(_path):
                 self._safe_after(0, lambda: self.now_playing_var.set(replacement))
-            synth_and_play(replacement, on_ready=_on_ready)
+            synth_and_play(replacement, rdir, on_ready=_on_ready)
         else:
-            # Correct list — show word in fix entry, play it
             self._fix_entry_word = original
             self.fix_var.set(original)
             self._play_word(original)
@@ -529,21 +670,22 @@ class ProperNounAuditor(tk.Tk):
         # If the fix box contains something different from the word, regen that text
         is_fix_replacement = bool(fix_text and fix_text != word)
 
+        if not self.book:
+            return
         if is_fix_replacement:
-            # Re-gen the cached replacement audio
-            target = REPLACEMENTS_DIR / f"{_slug(fix_text)}.wav"
+            target = self._replacements_dir / f"{_slug(fix_text)}.wav"
             if target.exists():
                 target.unlink()
             self.now_playing_var.set(f"… regen {fix_text}")
+            rdir = self._replacements_dir
             def _on_ready(_p):
                 self._safe_after(0, lambda: self.now_playing_var.set(fix_text))
-            synth_and_play(fix_text, on_ready=_on_ready)
+            synth_and_play(fix_text, rdir, on_ready=_on_ready)
         else:
-            # Re-gen the manifest audio for the review word
             wav_name = self.manifest.get(word)
             if not wav_name:
                 return
-            wav_path = AUDIO_DIR / wav_name
+            wav_path = self._audio_dir / wav_name
             if wav_path.exists():
                 wav_path.unlink()
             self.now_playing_var.set(f"… regen {word}")
@@ -612,46 +754,24 @@ class ProperNounAuditor(tk.Tk):
         from_idx = idx[0] if idx else 0
         if word not in self.correct:
             self.correct.insert(0, word)
-        save_json(CORRECT_FILE, self.correct)
+        save_json(self._correct_file, self.correct)
         self._fix_entry_word = ""
         self.fix_var.set("")
         self.now_playing_var.set("—")
         self._refresh_all()
         self._advance_review(from_idx)
-
-    def _mark_correct(self) -> None:
-        word = self._selected_review_word()
-        if not word:
-            messagebox.showinfo("Nothing selected",
-                                "Select a word from the Review list first.")
-            return
-        self._mark_correct_word(word)
 
     def _add_fix_for_word(self, word: str, replacement: str) -> None:
         idx = self.review_lb.curselection()
         from_idx = idx[0] if idx else 0
-        # Remove and re-add so updated entries bubble to the top
         self.fixes.pop(word, None)
         self.fixes[word] = replacement
-        save_json(FIXES_FILE, self.fixes)
+        save_json(self._fixes_file, self.fixes)
         self._fix_entry_word = ""
         self.fix_var.set("")
         self.now_playing_var.set("—")
         self._refresh_all()
         self._advance_review(from_idx)
-
-    def _add_fix(self) -> None:
-        word = self._selected_review_word()
-        replacement = self.fix_var.get().strip()
-        if not word:
-            messagebox.showinfo("Nothing selected",
-                                "Select a word from the Review list first.")
-            return
-        if not replacement or replacement == word:
-            messagebox.showinfo("No replacement",
-                                "Type the phonetic replacement in the Fix box.")
-            return
-        self._add_fix_for_word(word, replacement)
 
     def _move_back(self, listbox: tk.Listbox, is_dict: bool) -> None:
         sel = listbox.curselection()
@@ -660,33 +780,127 @@ class ProperNounAuditor(tk.Tk):
         raw = listbox.get(sel[0]).strip().split("  →  ")[0].strip()
         if is_dict:
             self.fixes.pop(raw, None)
-            save_json(FIXES_FILE, self.fixes)
-            # Also remove from correct so the word returns to Review, not Correct
+            save_json(self._fixes_file, self.fixes)
             if raw in self.correct:
                 self.correct.remove(raw)
-                save_json(CORRECT_FILE, self.correct)
+                save_json(self._correct_file, self.correct)
         else:
             if raw in self.correct:
                 self.correct.remove(raw)
-            save_json(CORRECT_FILE, self.correct)
+            save_json(self._correct_file, self.correct)
         self._refresh_all()
 
-    # ── Apply fixes to source text ─────────────────────────────────────────────
+    # ── Extract & Generate ─────────────────────────────────────────────────────────────
+
+    def _extract_and_generate(self) -> None:
+        """Extract proper nouns from the selected book’s source text, then
+        generate a TTS audio clip for each one.  Runs in a background thread.
+        """
+        if not self.book:
+            messagebox.showinfo("No book selected", "Please select a book first.")
+            return
+
+        missing = [p for p in self.book.source_paths if not p.exists()]
+        if missing:
+            messagebox.showerror(
+                "Source file(s) not found",
+                "Could not find:\n" + "\n".join(str(p) for p in missing))
+            return
+
+        self._extract_btn.config(state="disabled")
+        self._book_status_var.set("Loading spaCy NLP model…")
+        book = self.book   # capture for the thread
+
+        def _run():
+            try:
+                self._safe_after(0, lambda: self._book_status_var.set(
+                    "Running NLP extraction (may take a minute)…"))
+                words = _extract_nouns_from_paths(book.source_paths)
+                n_extracted = len(words)
+                self._safe_after(0, lambda: self._book_status_var.set(
+                    f"Extracted {n_extracted} nouns — generating audio…"))
+
+                data_dir  = Path("output_proper_nouns") / book.slug
+                audio_dir = Path("proper_nouns_audio")  / book.slug
+                data_dir.mkdir(parents=True, exist_ok=True)
+                audio_dir.mkdir(parents=True, exist_ok=True)
+
+                manifest_path = data_dir / "manifest.json"
+                manifest: dict = load_json(manifest_path, {})
+
+                pipeline = _get_pipeline()
+                done = failed = 0
+
+                for i, word in enumerate(sorted(words, key=str.casefold)):
+                    word_slug = re.sub(r"[^a-z0-9]+", "_", word.lower()).strip("_")
+                    wav_name  = f"{word_slug}.wav"
+                    wav_path  = audio_dir / wav_name
+
+                    if word in manifest and wav_path.exists():
+                        continue
+
+                    try:
+                        import warnings, numpy as np
+                        chunks = []
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings("ignore", category=UserWarning)
+                            for _, _, audio in pipeline(word, voice=VOICE):
+                                if audio is not None:
+                                    chunks.append(audio)
+                        if chunks:
+                            sf.write(str(wav_path), np.concatenate(chunks), SAMPLE_RATE)
+                            manifest[word] = wav_name
+                            done += 1
+                        else:
+                            failed += 1
+                    except Exception as exc:
+                        print(f"[gen] failed for '{word}': {exc}")
+                        failed += 1
+
+                    if i % 10 == 0:
+                        remaining = n_extracted - i
+                        self._safe_after(0, lambda r=remaining:
+                            self._book_status_var.set(f"Generating audio… {r} remaining"))
+
+                manifest_path.write_text(
+                    json.dumps(manifest, ensure_ascii=False, indent=2))
+                self._safe_after(0, lambda:
+                    self._finish_extract(book, manifest, done, failed))
+
+            except ImportError as exc:
+                msg = (f"Missing dependency: {exc}\n\n"
+                       "Install with:  pip install spacy wordfreq\n"
+                       "Then:          python -m spacy download en_core_web_sm")
+                self._safe_after(0, lambda m=msg: messagebox.showerror(
+                    "Missing package", m))
+                self._safe_after(0, lambda: self._book_status_var.set("Error — see popup"))
+                self._safe_after(0, lambda: self._extract_btn.config(state="normal"))
+            except Exception as exc:
+                err = str(exc)
+                self._safe_after(0, lambda e=err: self._book_status_var.set(f"Error: {e}"))
+                self._safe_after(0, lambda: self._extract_btn.config(state="normal"))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _finish_extract(self, book: BookSource, manifest: dict,
+                        done: int, failed: int) -> None:
+        self._extract_btn.config(state="normal")
+        self._book_status_var.set(
+            f"Done — {len(manifest)} words total  ({done} new, {failed} failed)")
+        if self.book and self.book.slug == book.slug:
+            self._load_book(book)
 
     def _pregen_all_fix_audio(self) -> None:
-        """Synthesise and cache audio for every replacement phonetic string."""
+        if not self.book:
+            return
         if not self.fixes:
             messagebox.showinfo("No fixes", "The Fixes list is empty.")
             return
 
         replacements = list(self.fixes.values())
         total = len(replacements)
-        already = sum(
-            1 for r in replacements
-            if (REPLACEMENTS_DIR / f"{_slug(r)}.wav").exists()
-        )
-
-        # Confirm if it'll take a while
+        rdir = self._replacements_dir
+        already = sum(1 for r in replacements if (rdir / f"{_slug(r)}.wav").exists())
         new_count = total - already
         if new_count == 0:
             messagebox.showinfo("Already done",
@@ -700,14 +914,13 @@ class ProperNounAuditor(tk.Tk):
             try:
                 done = 0
                 for rep in replacements:
-                    cache_path = REPLACEMENTS_DIR / f"{_slug(rep)}.wav"
-                    if not cache_path.exists():
-                        _synth_to_cache(rep)
+                    if not (rdir / f"{_slug(rep)}.wav").exists():
+                        _synth_to_cache(rep, rdir)
                         done += 1
                         self._safe_after(0, lambda d=done, t=new_count:
-                                   self._pregen_status_var.set(f"{d} / {t} synthesised…"))
-                self._safe_after(0, lambda: self._pregen_status_var.set(
-                    f"Done — {total} clips ready"))
+                            self._pregen_status_var.set(f"{d} / {t} synthesised…"))
+                self._safe_after(0, lambda:
+                    self._pregen_status_var.set(f"Done — {total} clips ready"))
             except Exception as exc:
                 print(f"[pregen] error: {exc}")
             finally:
@@ -716,23 +929,31 @@ class ProperNounAuditor(tk.Tk):
         threading.Thread(target=_run, daemon=True).start()
 
     def _export_remaining(self) -> None:
+        if not self.book:
+            return
         words = self._review_words()
         if not words:
             messagebox.showinfo("Nothing to export", "No words left to review.")
             return
-        out = DATA_DIR / "remaining_review.txt"
+        out = self._data_dir / "remaining_review.txt"
         out.write_text("\n".join(words), encoding="utf-8")
-        messagebox.showinfo("Exported",
-                            f"{len(words)} words written to:\n{out}")
+        messagebox.showinfo("Exported", f"{len(words)} words written to:\n{out}")
 
     def _apply_fixes(self) -> None:
+        if not self.book:
+            return
         if not self.fixes:
             messagebox.showinfo("No fixes", "The Fixes list is empty.")
             return
-        if not SOURCE_TEXT.exists():
-            messagebox.showerror("Source not found", f"Cannot find:\n{SOURCE_TEXT}")
-            return
-        text = SOURCE_TEXT.read_text(encoding="utf-8")
+
+        parts = []
+        for p in self.book.source_paths:
+            if not p.exists():
+                messagebox.showerror("Source not found", f"Cannot find:\n{p}")
+                return
+            parts.append(p.read_text(encoding="utf-8"))
+        text = "\n\n".join(parts)
+
         count_total = 0
         for original, replacement in self.fixes.items():
             pattern = r'\b' + re.escape(original) + r'\b'
@@ -741,36 +962,116 @@ class ProperNounAuditor(tk.Tk):
                 text = new_text
                 count_total += n
 
-        # Convert ALL-CAPS words (2+ letters) to Title Case: HAGOTH → Hagoth
-        # Handles hyphenated names like ANTI-NEPHI-LEHI → Anti-Nephi-Lehi
         text, n_caps = re.subn(
             r'\b[A-Z]{2,}(?:-[A-Z]{2,})*\b',
             lambda m: m.group(0).title(),
             text,
         )
 
-        FIXED_TEXT_OUT.write_text(text, encoding="utf-8")
+        self.book.fixed_out.write_text(text, encoding="utf-8")
         messagebox.showinfo(
             "Done",
             f"Applied {len(self.fixes)} fix rules ({count_total} replacements).\n"
             f"Converted {n_caps} ALL-CAPS words to Title Case.\n\n"
-            f"Saved to:\n{FIXED_TEXT_OUT}"
+            f"Saved to:\n{self.book.fixed_out}"
         )
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# ── Standalone NLP extraction (lazy-imports spaCy) ─────────────────────────────────
+
+def _extract_nouns_from_paths(source_paths: list) -> set[str]:
+    """Run spaCy NER + PROPN pass over all *source_paths* and return a set of
+    unique proper-noun strings, noise-filtered.
+    Raises ImportError if spaCy or wordfreq are not installed.
+    """
+    import spacy                        # lazy — only loaded when button is clicked
+    from wordfreq import top_n_list
+
+    TOP_10K: frozenset[str] = frozenset(top_n_list("en", 10_000))
+    WHITELIST: frozenset[str] = frozenset({
+        "aaron","abel","abraham","adam","cain","eden","egypt",
+        "elijah","ephraim","eve","gad","ham","isaac","israel",
+        "jacob","james","jehovah","john","joseph","judah",
+        "laban","lehi","levi","micah","michael","moses","noah",
+        "peter","pharaoh","samuel","sarah","sarai","seth","simeon",
+        "timothy","zion",
+        "alma","ether","gideon","limhi","mormon","moroni","mulek",
+        "mosiah","nephi","satan","sidon",
+    })
+    STOP_WORDS: set[str] = {
+        "A","AN","AND","AS","AT","BE","BUT","BY","DO","DID","DOTH","EVEN",
+        "FOR","FROM","HAD","HAS","HAVE","HATH","HE","HER","HIS","HOW","I",
+        "IN","IS","IT","ITS","MAY","ME","MORE","MY","NAY","NO","NOT","NOW",
+        "OF","OR","OUR","SHALL","SHE","SO","SOME","THAT","THE","THEE",
+        "THEIR","THEN","THERE","THESE","THEY","THIS","THOSE","THOU","THUS",
+        "THY","TO","UP","UPON","US","WAS","WE","WHEN","WHERE","WHICH","WHO",
+        "WILL","WITH","YE","YEA","YET","YOU","YOUR",
+        "BEHOLD","CHAPTER","CHRIST","GOD","GHOST","HOLY","LORD","VERSE",
+        "CITY","DAYS","DAY","GREAT","LAND","MAN","MEN","NEW","PEOPLE","SON","TIME",
+    }
+
+    def _is_noise(t: str) -> bool:
+        t = t.strip()
+        if len(t) <= 1: return True
+        if t.isupper() and len(t) > 4: return True
+        if t.upper() in STOP_WORDS: return True
+        if re.search(r"[^a-zA-Z\-']", t): return True
+        if "-" not in t and t.lower() in TOP_10K and t.lower() not in WHITELIST:
+            return True
+        return False
+
+    def _canonical(text: str) -> str:
+        return " ".join(text.split()).title()
+
+    nlp = spacy.load("en_core_web_sm")
+    nlp.max_length = 4_000_000
+
+    PERSON = {"PERSON"}
+    PLACE  = {"GPE", "LOC", "FAC"}
+    ORG    = {"ORG", "NORP"}
+    OTHER  = {"EVENT", "WORK_OF_ART", "LAW", "PRODUCT", "LANGUAGE"}
+
+    found: set[str] = set()
+
+    for path in source_paths:
+        raw = path.read_text(encoding="utf-8")
+        doc = nlp(raw)
+
+        for ent in doc.ents:
+            if ent.label_ not in (PERSON | PLACE | ORG | OTHER):
+                continue
+            for word in _canonical(ent.text).split():
+                if not _is_noise(word):
+                    found.add(word)
+
+        for token in doc:
+            if token.pos_ != "PROPN":
+                continue
+            t = token.text.strip()
+            if not t[0].isupper() or t.isupper():
+                continue
+            if token.i == token.sent.start:
+                continue
+            word = _canonical(t)
+            if not _is_noise(word) and word not in found:
+                found.add(word)
+
+    return found
+
+
+# ── Entry point ──────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    if not MANIFEST_FILE.exists():
-        print(f"Manifest not found: '{MANIFEST_FILE}'")
-        print("Run generate_proper_noun_audio.py first.")  # noqa
-        print("Run generate_proper_noun_audio.py first.")
+    books = discover_books()
+    if not books:
+        print("No source text files found in the current directory.")
         raise SystemExit(1)
 
-    manifest: dict[str, str] = json.loads(MANIFEST_FILE.read_text(encoding="utf-8"))
-    print(f"Loaded {len(manifest)} entries from manifest.")
+    print(f"Discovered {len(books)} book source(s):")
+    for b in books:
+        print(f"  [{b.slug}]  {b.label}  ({len(b.source_paths)} file(s))")
 
-    app = ProperNounAuditor(manifest)
+    app = ProperNounAuditor(books)
     app.mainloop()
 
 

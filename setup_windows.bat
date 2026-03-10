@@ -55,12 +55,19 @@ if errorlevel 1 (
 echo.
 
 :: ── 4. Install remaining packages ────────────────────────────────────────────
-echo [4/5] Installing remaining packages (kokoro, soundfile, sounddevice)...
+echo [4/5] Installing remaining packages (kokoro, soundfile, sounddevice, spacy, wordfreq)...
 .venv\Scripts\pip install -r requirements.txt
 if errorlevel 1 (
     echo  ERROR: Package installation failed. Check your internet connection.
     pause
     exit /b 1
+)
+
+echo Downloading spaCy English language model (en_core_web_sm, ~15 MB)...
+.venv\Scripts\python -m spacy download en_core_web_sm
+if errorlevel 1 (
+    echo  WARNING: spaCy model download failed. Proper noun extraction will not work
+    echo  until you re-run:  .venv\Scripts\python -m spacy download en_core_web_sm
 )
 echo.
 
