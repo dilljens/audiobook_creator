@@ -1,112 +1,115 @@
-# Audiobook Generator — Windows 11 Setup Guide
+# Audiobook Creator
 
-This guide is written for someone who has never used Python or the command line.
-Follow the steps in order and you'll be generating audiobook chapters with a gaming GPU.
-
----
-
-## What you'll need
-
-| Requirement | Why |
-|---|---|
-| Windows 11 PC with a modern NVIDIA GPU | Fast audio generation using CUDA |
-| ~5 GB free disk space | Python, PyTorch, and the TTS model |
-| Internet connection (first-time only) | Downloads packages and the AI voice model |
+AI-powered audiobook generator using the [Kokoro TTS](https://github.com/hexgrad/kokoro) model.
+Generates high-quality narrated `.wav` files from plain-text novels, with a GUI tool for auditing and fixing proper noun pronunciations per book.
 
 ---
 
-## Step 1 — Install Python
+## Features
 
-1. Go to **https://www.python.org/downloads/**
-2. Click the big yellow **"Download Python 3.11.x"** button
-3. Run the installer
-4. **IMPORTANT:** On the first screen, tick the box that says **"Add Python to PATH"** before you click Install Now
-
-If you skipped that checkbox, uninstall Python and reinstall with the box ticked.
+- **Multi-book support** — each book's proper nouns, fixes, and audio are fully isolated
+- **Proper Noun GUI** — hear every extracted name, mark it correct or type a phonetic fix
+- **Audiobook generation** — one `.wav` per chapter, GPU-accelerated via CUDA
+- **In-GUI extraction** — click one button to run NLP extraction and generate audio, no separate scripts needed
+- **Apply Fixes** — writes a TTS-ready copy of the source text with all phonetic substitutions applied
 
 ---
 
-## Step 2 — Get the project files
-
-You should have a folder (e.g. `voice_model`) containing the project. Make sure it contains:
+## Project structure
 
 ```
-setup_windows.bat
-run_gui.bat
-run_audiobook.bat
+Audio Text for Novel Lightbringer/   ← multi-file book (chapters as .txt)
+Audio Master Nem Full.txt            ← single-file book
+
+gui_proper_noun_player.py            ← proper noun auditing GUI
+create_audiobook_lightbringer.py     ← generate Lightbringer audiobook chapters
+create_audiobook_nem.py              ← generate Nem audiobook chapters
+
+output_audiobook_lightbringer/       ← chapter WAV output
+output_audiobook/                    ← Nem WAV output
+output_proper_nouns/<book>/          ← manifest + JSON fix data per book
+proper_nouns_audio/<book>/           ← word audio + replacements cache per book
+
 requirements.txt
-gui_proper_noun_player.py
-create_audiobook_lightbringer.py
-Audio Text for Novel Lightbringer\   ← your text files go here
+setup_windows.bat                    ← one-click Windows setup
+run_gui.bat                          ← launch GUI on Windows
+run_audiobook.bat                    ← generate audiobook on Windows
 ```
 
 ---
 
-## Step 3 — Run Setup (one time only)
+## Setup (Linux / Mac)
 
-1. Open the `voice_model` folder in File Explorer
-2. Double-click **`setup_windows.bat`**
-3. A black terminal window will open and run through 5 steps:
-   - Checks Python is installed
-   - Creates a private Python environment
-   - Downloads PyTorch with GPU (CUDA) support — **~2.5 GB, be patient**
-   - Installs the remaining packages
-   - Downloads the Kokoro AI voice model — **~330 MB**
-4. When it says **"Setup complete!"**, press any key to close
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cu124   # CUDA 12.4
+pip install -r requirements.txt
+python -m spacy download en_core_web_sm
+```
 
-You only need to do this once.
+> For CPU-only: replace the torch line with `pip install torch`
 
 ---
 
-## Step 4 — Launch the GUI (Proper Noun Player)
+## Setup (Windows)
 
-1. Double-click **`run_gui.bat`**
-2. The Proper Noun Player window opens
-3. Use it to review and fix how proper nouns are pronounced before generating audio
-
-**Controls:**
-- Click a word in the Review list to hear it
-- Type a phonetic spelling in the box at the bottom and press Enter to save a fix
-- Press Enter without changing anything to mark the word as Correct
-- Press Space to replay the current word
-- Click "Apply Fixes to Text" when done to save a pronunciation-corrected text file
+See [SETUP_WINDOWS.md](SETUP_WINDOWS.md) for a step-by-step guide aimed at non-technical users.
 
 ---
 
-## Step 5 — Create the Audiobook
+## Usage
 
-1. Double-click **`run_audiobook.bat`**
-2. A menu appears:
-   - **1** — Generate ALL chapters (this can take many hours — leave it running overnight)
-   - **2** — Just list what chapters were detected (safe, instant)
-   - **3** — Generate a short preview clip of each chapter (quick test)
-   - **4** — Generate specific chapter numbers only
-3. Choose an option and press Enter
-4. When finished, the `.wav` files will be in the `output_audiobook_lightbringer` folder
+### Proper Noun GUI
+
+```bash
+.venv/bin/python gui_proper_noun_player.py
+```
+
+1. Select a book from the dropdown
+2. Click **⚙ Extract & Generate Audio** — extracts proper nouns via spaCy and generates a TTS clip for each one
+3. Click words in the Review list to hear them; press Enter to mark correct or type a phonetic replacement first
+4. Click **⇄ Apply Fixes to Text** to write a pronunciation-corrected copy of the source file
+
+### Generate Audiobook
+
+```bash
+# All chapters
+.venv/bin/python create_audiobook_lightbringer.py
+
+# List chapters only
+.venv/bin/python create_audiobook_lightbringer.py --list
+
+# Preview clips
+.venv/bin/python create_audiobook_lightbringer.py --preview
+
+# Specific chapters
+.venv/bin/python create_audiobook_lightbringer.py 0 1 2
+```
 
 ---
 
-## Troubleshooting
+## Dependencies
 
-**"Python was not found"**
-→ Python is not installed, or you forgot to tick "Add Python to PATH". Reinstall Python.
-
-**The window opens and immediately closes**
-→ Right-click the `.bat` file → "Run as administrator", or open a new terminal window first:
-press `Win + R`, type `cmd`, press Enter, then drag the `.bat` file into that window and press Enter.
-
-**Audio generation is very slow**
-→ The GPU (CUDA) version of PyTorch may not have installed correctly. Re-run `setup_windows.bat`.
-
-**"No .txt files found in Audio Text for Novel Lightbringer"**
-→ Make sure your chapter text files are placed in the `Audio Text for Novel Lightbringer` subfolder.
-
----
-
-## Output files
-
-| Folder | Contents |
+| Package | Purpose |
 |---|---|
-| `output_audiobook_lightbringer\` | One `.wav` file per chapter |
-| `output_proper_nouns\` | Pronunciation fix data (JSON) |
-| `proper_nouns_audio\` | Cached audio for each proper noun |
+| `kokoro` | Kokoro-82M TTS model |
+| `torch` | GPU inference |
+| `soundfile` / `sounddevice` | Audio I/O |
+| `numpy` | Audio array operations |
+| `spacy` + `en_core_web_sm` | Proper noun extraction (NER + PROPN) |
+| `wordfreq` | Common-word filter during extraction |
+
+---
+
+## Output
+
+| Path | Contents |
+|---|---|
+| `output_audiobook_lightbringer/` | `chapter_01_homecoming.wav`, … |
+| `output_proper_nouns/<book>/manifest.json` | Word → WAV filename map |
+| `output_proper_nouns/<book>/pronunciation_fixes.json` | `{"Nephi": "Kneephi", …}` |
+| `output_proper_nouns/<book>/correct_words.json` | Words confirmed correct |
+| `proper_nouns_audio/<book>/` | Per-word audio clips |
+| `proper_nouns_audio/<book>/replacements_cache/` | Cached phonetic fix clips |
+
