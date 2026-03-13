@@ -142,11 +142,14 @@ def clean_text(text: str) -> str:
 
 
 def _fmt_duration(seconds: float) -> str:
-    """Format seconds as 'Xm Ys' or 'Xs'."""
-    if seconds >= 60:
-        m, s = divmod(int(seconds), 60)
+    """Format seconds as 'Xh Ym Zs', 'Xm Ys', or 'Xs'."""
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m > 0:
         return f"{m}m {s:02d}s"
-    return f"{seconds:.0f}s"
+    return f"{s}s"
 
 
 def generate_audio(pipeline: KPipeline, text: str, voice: str,
@@ -166,7 +169,7 @@ def generate_audio(pipeline: KPipeline, text: str, voice: str,
         sf.write(str(output_path), audio, SAMPLE_RATE)
         elapsed = time.monotonic() - t0
         duration = len(audio) / SAMPLE_RATE
-        print(f"  ✓  Saved '{output_path.name}'  ({duration:.1f}s audio  |  {elapsed:.1f}s wall-clock)")
+        print(f"  ✓  Saved '{output_path.name}'  ({_fmt_duration(duration)} audio  |  {_fmt_duration(elapsed)} wall-clock)")
     else:
         elapsed = time.monotonic() - t0
         print(f"  ✗  No audio produced for voice='{voice}'")
@@ -291,7 +294,9 @@ def main() -> None:
         total_elapsed_done = sum(e for _, _, e in timing_rows)
         if total_elapsed_done > 0:
             chars_per_sec = total_chars_done / total_elapsed_done
-            print(f"  ⏱  Calibration: {chars_per_sec:.0f} chars/sec")
+            remaining = total_chars - total_chars_done
+            eta_overall = _fmt_duration(remaining / chars_per_sec) if remaining > 0 else "0s"
+            print(f"  ⏱  Speed: {chars_per_sec:.0f} chars/sec  |  Est. overall remaining: {eta_overall}")
 
     # ── Summary ────────────────────────────────────────────────────────────────
     print("\n" + "─" * 60)
